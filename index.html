@@ -1,0 +1,920 @@
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import {
+ Type, Image as ImageIcon, Download, Upload, Trash2, LayoutTemplate, Settings,
+ Plus, Save, AlignLeft, AlignCenter, AlignRight, RefreshCcw, Maximize, Palette,
+ Monitor, AlertCircle, ChevronDown, ChevronRight, Undo, Redo, Sparkles, Send,
+ Bot, User, X, Loader2, Check, FileText, MousePointer2, Scan, Group, Ungroup,
+ Layers, ArrowDown, ArrowRight, ArrowUp, ArrowLeft, ChevronUp, Square,
+ Paintbrush, Link as LinkIcon, RotateCw, ImageDown, BarChart3, BookOpen, Presentation
+} from 'lucide-react';
+
+// --- 0. Constants & API ---
+
+// 修正箇所1: APIキーをlocalStorageから取得する関数
+const getStoredApiKey = () => {
+  if (typeof window !== 'undefined') {
+    return localStorage.getItem('gemini_api_key') || "";
+  }
+  return "";
+};
+
+// Retry Helper for API Calls
+const fetchWithRetry = async (url: string, options: RequestInit, retries = 5, backoff = 1000): Promise<Response> => {
+ for (let i = 0; i <= retries; i++) {
+  try {
+   const response = await fetch(url, options);
+   if (response.ok) {
+    return response;
+   }
+   if (i === retries) {
+    throw new Error(`Request failed with status ${response.status}`);
+   }
+  } catch (error) {
+   if (i === retries) {
+    throw error;
+   }
+  }
+  await new Promise(resolve => setTimeout(resolve, backoff * Math.pow(2, i)));
+ }
+ throw new Error("Max retries exceeded");
+};
+
+// 修正箇所2: Gemini Generation Helper の修正
+const generateGeminiContent = async (prompt: string, systemPrompt: string = ""): Promise<string> => {
+  const currentApiKey = getStoredApiKey();
+  
+  if (!currentApiKey) {
+      return "【エラー】APIキーが設定されていません。画面右上の設定（歯車アイコン）からGemini APIキーを入力してください。";
+  }
+  
+  const payload = {
+    contents: [{ parts: [{ text: prompt }] }],
+    systemInstruction: systemPrompt ? { parts: [{ text: systemPrompt }] } : undefined
+  };
+
+  try {
+    // ユーザー指定のモデル(gemini-2.0-flash-exp)を使用
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${currentApiKey}`;
+    
+    const response = await fetchWithRetry(
+      url,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      }
+    );
+    const data = await response.json();
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || "No response generated.";
+  } catch (e) {
+    console.error(e);
+    return "Error generating content. Please check your API Key.";
+  }
+};
+
+// --- 1. Types ---
+
+interface BoxStyle {
+ fontSize: number;
+ color: string;
+ backgroundColor?: string;
+ backgroundImage?: string;
+ fontWeight: 'normal' | 'bold';
+ lineHeight: number;
+ letterSpacing: number; // px
+ textAlign: 'left' | 'center' | 'right';
+ borderRadius?: number;
+}
+
+interface AutoLayoutProps {
+ direction: 'vertical' | 'horizontal' | 'none' | 'vertical-reverse' | 'horizontal-reverse';
+ gap: number;
+ padding: number;
+ alignItems: 'flex-start' | 'center' | 'flex-end';
+}
+
+interface BannerElement {
+ id: string;
+ type: 'text' | 'group' | 'shape';
+ label?: string;
+ text?: string; // For text type
+ x: number;
+ y: number;
+ width: number;
+ height: number;
+ style: BoxStyle;
+ customCss: string;
+ maxChars?: number;
+ 
+ // Group / AutoLayout related
+ children?: string[]; // IDs of children
+ parentId?: string | null;
+ layoutProps?: AutoLayoutProps;
+ 
+ themeStyles?: Record<string, { style: BoxStyle; customCss: string }>;
+}
+
+interface ThemeDefinition {
+ id: string;
+ name: string;
+}
+
+interface CanvasState {
+ elements: BannerElement[];
+ canvasSize: { width: number; height: number };
+ background: {
+  image: string | null;
+  color: string;
+  customCss: string;
+  config: { x: number; y: number; scale: number; rotation: number };
+  isCustomized: boolean;
+ };
+ aiRegulation: string;
+ themes: ThemeDefinition[];
+ currentThemeId: string;
+}
+
+interface Template {
+ id: string;
+ name: string;
+ description: string;
+ elements: BannerElement[];
+ previewColor: string;
+ defaultBgColor?: string;
+ canvasSize: { width: number; height: number };
+ aiRegulation?: string;
+ themes?: ThemeDefinition[];
+}
+
+interface StoreData {
+    storeName: string;
+    monthlySales: string;
+    customerCount: string;
+    avgCustomerSpend: string;
+    staffCount: string;
+    mainIssues: string;
+}
+
+interface AnalysisResult {
+    score: number;
+    summary: string;
+    points: { title: string; detail: string; impact: 'High' | 'Medium' | 'Low' }[];
+    actionPlan: string;
+}
+
+// --- 2. Utilities & Hooks ---
+
+const useHistory = <T,>(initialState: T) => {
+ const [past, setPast] = useState<T[]>([]);
+ const [present, setPresent] = useState<T>(initialState);
+ const [future, setFuture] = useState<T[]>([]);
+
+ const set = useCallback((newState: T | ((prev: T) => T), withHistory: boolean = true) => {
+  setPresent((curr) => {
+   const next = typeof newState === 'function' ? (newState as (prev: T) => T)(curr) : newState;
+   if (withHistory) {
+    setPast((prevPast) => [...prevPast, curr]);
+    setFuture([]);
+   }
+   return next;
+  });
+ }, []);
+
+ const undo = useCallback(() => {
+  setPast((prevPast) => {
+   if (prevPast.length === 0) return prevPast;
+   const previous = prevPast[prevPast.length - 1];
+   const newPast = prevPast.slice(0, prevPast.length - 1);
+   setPresent((curr) => {
+    setFuture((prevFuture) => [curr, ...prevFuture]);
+    return previous;
+   });
+   return newPast;
+  });
+ }, []);
+
+ const redo = useCallback(() => {
+  setFuture((prevFuture) => {
+   if (prevFuture.length === 0) return prevFuture;
+   const next = prevFuture[0];
+   const newFuture = prevFuture.slice(1);
+   setPresent((curr) => {
+    setPast((prevPast) => [...prevPast, curr]);
+    return next;
+   });
+   return newFuture;
+  });
+ }, []);
+
+ return { state: present, set, undo, redo, canUndo: past.length > 0, canRedo: future.length > 0 };
+};
+
+const createId = () => crypto.randomUUID();
+
+// リサイズ・ドラッグ処理フック
+const useDraggableResizable = (
+ initial: { x: number; y: number; w: number; h: number },
+ onChange: (vals: { x: number; y: number; w: number; h: number }) => void,
+ onDragEnd: () => void,
+ isSelected: boolean,
+ scale: number = 1
+) => {
+ const [dragging, setDragging] = useState(false);
+ const [resizing, setResizing] = useState(false);
+ const startPos = useRef({ x: 0, y: 0 });
+ const startVals = useRef(initial);
+
+ const handleMouseDown = (e: React.MouseEvent) => {
+  if (!isSelected) return;
+  e.stopPropagation();
+  if (e.button !== 0) return;
+  setDragging(true);
+  startPos.current = { x: e.clientX, y: e.clientY };
+  startVals.current = initial;
+ };
+
+ const handleResizeStart = (e: React.MouseEvent) => {
+  e.stopPropagation();
+  e.preventDefault();
+  setResizing(true);
+  startPos.current = { x: e.clientX, y: e.clientY };
+  startVals.current = initial;
+ };
+
+ useEffect(() => {
+  const handleMouseMove = (e: MouseEvent) => {
+   if (!dragging && !resizing) return;
+   const dx = (e.clientX - startPos.current.x) / scale;
+   const dy = (e.clientY - startPos.current.y) / scale;
+
+   if (dragging) {
+    onChange({
+     ...startVals.current,
+     x: startVals.current.x + dx,
+     y: startVals.current.y + dy,
+    });
+   } else if (resizing) {
+    onChange({
+     ...startVals.current,
+     w: Math.max(50, startVals.current.w + dx),
+     h: Math.max(30, startVals.current.h + dy),
+    });
+   }
+  };
+  const handleMouseUp = () => {
+   if (dragging || resizing) {
+    setDragging(false);
+    setResizing(false);
+    onDragEnd();
+   }
+  };
+  if (dragging || resizing) {
+   window.addEventListener('mousemove', handleMouseMove);
+   window.addEventListener('mouseup', handleMouseUp);
+  }
+  return () => {
+   window.removeEventListener('mousemove', handleMouseMove);
+   window.removeEventListener('mouseup', handleMouseUp);
+  };
+ }, [dragging, resizing, onChange, onDragEnd, scale]);
+
+ return { handleMouseDown, handleResizeStart };
+};
+
+// --- 3. Templates & Defaults ---
+
+const DEFAULT_THEME_ID = 'default';
+
+const TEMPLATES: Template[] = [
+ {
+  id: 'report-a4',
+  name: 'A4 Report',
+  description: '店舗改善レポート用',
+  previewColor: 'bg-white',
+  defaultBgColor: '#ffffff',
+  canvasSize: { width: 595, height: 842 }, // A4 72dpi equivalent approx
+  themes: [{ id: DEFAULT_THEME_ID, name: 'Default' }],
+  elements: [
+    {
+        id: 'title', type: 'text', text: '店舗健康診断レポート',
+        x: 40, y: 40, width: 515, height: 60,
+        style: { fontSize: 24, fontWeight: 'bold', color: '#333', textAlign: 'center', lineHeight: 1.5, letterSpacing: 0 },
+        customCss: ''
+    },
+    {
+        id: 'score-box', type: 'shape',
+        x: 40, y: 120, width: 515, height: 100,
+        style: { fontSize: 16, color: '#333', backgroundColor: '#f0f9ff', fontWeight: 'normal', lineHeight: 1.5, letterSpacing: 0, textAlign: 'left', borderRadius: 8 },
+        customCss: 'border: 2px solid #bae6fd;'
+    },
+    {
+        id: 'score-text', type: 'text', text: '総合スコア: --点',
+        x: 60, y: 140, width: 400, height: 40,
+        style: { fontSize: 28, fontWeight: 'bold', color: '#0284c7', textAlign: 'left', lineHeight: 1.2, letterSpacing: 0 },
+        customCss: ''
+    }
+  ]
+ }
+];
+
+const INITIAL_CANVAS_STATE: CanvasState = {
+ elements: TEMPLATES[0].elements,
+ canvasSize: TEMPLATES[0].canvasSize,
+ background: {
+  image: null,
+  color: '#ffffff',
+  customCss: '',
+  config: { x: 0, y: 0, scale: 1, rotation: 0 },
+  isCustomized: false
+ },
+ aiRegulation: '',
+ themes: [{ id: DEFAULT_THEME_ID, name: 'Default' }],
+ currentThemeId: DEFAULT_THEME_ID
+};
+
+
+// --- Components ---
+
+const CanvasElementRender = ({
+ element,
+ isSelected,
+ onSelect,
+ onChange,
+ scale
+}: {
+ element: BannerElement;
+ isSelected: boolean;
+ onSelect: () => void;
+ onChange: (updates: Partial<BannerElement>) => void;
+ scale: number;
+}) => {
+ 
+ const handleChange = (vals: { x: number; y: number; w: number; h: number }) => {
+  onChange({
+   x: vals.x, y: vals.y, width: vals.w, height: vals.h
+  });
+ };
+
+ const { handleMouseDown, handleResizeStart } = useDraggableResizable(
+  { x: element.x, y: element.y, w: element.width, h: element.height },
+  handleChange,
+  () => {}, // drag end
+  isSelected,
+  scale
+ );
+
+ return (
+  <div
+   className={`absolute group hover:outline hover:outline-blue-200 ${isSelected ? 'outline outline-2 outline-blue-500 z-10' : 'z-0'}`}
+   style={{
+    left: element.x,
+    top: element.y,
+    width: element.width,
+    height: element.height,
+    cursor: isSelected ? 'move' : 'pointer',
+    ...element.style,
+    ...parseCss(element.customCss)
+   }}
+   onMouseDown={handleMouseDown}
+   onClick={(e) => { e.stopPropagation(); onSelect(); }}
+  >
+   {element.type === 'text' && (
+       <div className="w-full h-full whitespace-pre-wrap">{element.text}</div>
+   )}
+   
+   {isSelected && (
+    <>
+     <div
+      className="absolute bottom-0 right-0 w-4 h-4 bg-white border-2 border-blue-500 cursor-nwse-resize z-20"
+      onMouseDown={handleResizeStart}
+     />
+     <div className="absolute -top-6 left-0 bg-blue-500 text-white text-xs px-1 rounded">
+        {element.type}
+     </div>
+    </>
+   )}
+  </div>
+ );
+};
+
+const parseCss = (cssText: string): React.CSSProperties => {
+ const style: Record<string, any> = {};
+ if (!cssText) return style;
+ cssText.split(';').forEach((rule) => {
+  const [prop, value] = rule.split(':');
+  if (prop && value) {
+   const key = prop.trim().replace(/-./g, c => c.substr(1).toUpperCase());
+   style[key] = value.trim();
+  }
+ });
+ return style;
+};
+
+// --- Main Application ---
+
+export default function StoreAiApp() {
+ // Navigation State
+ const [activeTab, setActiveTab] = useState<'analysis' | 'material' | 'manual'>('analysis');
+ 
+ // Data State
+ const [storeData, setStoreData] = useState<StoreData>({
+    storeName: '渋谷駅前店',
+    monthlySales: '5000000',
+    customerCount: '4500',
+    avgCustomerSpend: '1100',
+    staffCount: '5',
+    mainIssues: 'ランチタイムの回転率が悪い。スタッフの教育が追いついていない。'
+ });
+ const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
+ const [isAnalyzing, setIsAnalyzing] = useState(false);
+
+ // Canvas State (Material Tab)
+ const { state: canvasState, set: setCanvasState, undo, redo, canUndo, canRedo } = useHistory<CanvasState>(INITIAL_CANVAS_STATE);
+ const [selectedId, setSelectedId] = useState<string | null>(null);
+ const [scale, setScale] = useState(0.8);
+ const [isGeneratingMaterial, setIsGeneratingMaterial] = useState(false);
+
+ // Manual State
+ const [manualText, setManualText] = useState("");
+ const [isGeneratingManual, setIsGeneratingManual] = useState(false);
+
+ // 修正箇所3: 設定モーダル用のステート
+ const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+ const [tempApiKey, setTempApiKey] = useState("");
+
+ useEffect(() => {
+    // コンポーネントマウント時にキーを取得
+    setTempApiKey(getStoredApiKey());
+ }, []);
+
+ const saveApiKey = () => {
+   localStorage.setItem('gemini_api_key', tempApiKey);
+   setIsSettingsOpen(false);
+   alert("APIキーを保存しました。");
+ };
+
+ // --- Logic: Analysis ---
+ const runAnalysis = async () => {
+    setIsAnalyzing(true);
+    const prompt = `
+    あなたは小売・飲食店の経営コンサルタントAIです。以下の店舗データに基づいて、健康診断を行い、課題と改善点をJSON形式で出力してください。
+    
+    【店舗データ】
+    店名: ${storeData.storeName}
+    月商: ${storeData.monthlySales}円
+    客数: ${storeData.customerCount}人
+    客単価: ${storeData.avgCustomerSpend}円
+    スタッフ数: ${storeData.staffCount}人
+    現場の声: ${storeData.mainIssues}
+
+    出力フォーマット(JSONのみ):
+    {
+        "score": 100点満点中の評価(数値),
+        "summary": "短い総評(100文字以内)",
+        "points": [
+            {"title": "改善点タイトル", "detail": "詳細な分析", "impact": "High" | "Medium" | "Low"}
+        ],
+        "actionPlan": "具体的なアクションプランの概要"
+    }
+    `;
+
+    try {
+        const resultText = await generateGeminiContent(prompt);
+        // エラーメッセージが返ってきた場合のハンドリング
+        if (resultText.startsWith("【エラー】") || resultText.startsWith("Error")) {
+            alert(resultText);
+            setIsAnalyzing(false);
+            return;
+        }
+
+        const jsonMatch = resultText.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            const result = JSON.parse(jsonMatch[0]);
+            setAnalysisResult(result);
+        } else {
+            alert("分析に失敗しました。もう一度お試しください。");
+        }
+    } catch (e) {
+        console.error(e);
+        alert("エラーが発生しました。APIキーを確認してください。");
+    } finally {
+        setIsAnalyzing(false);
+    }
+ };
+
+ // --- Logic: Material Generation ---
+ const generateMaterial = async () => {
+    if (!analysisResult) return;
+    setIsGeneratingMaterial(true);
+    
+    // We update the Canvas state based on analysis
+    const prompt = `
+    以下の店舗分析結果を元に、A4サイズの改善提案資料のレイアウトを更新するためのJSONを生成してください。
+    
+    【分析結果】
+    ${JSON.stringify(analysisResult)}
+
+    既存のCanvas要素を上書き・追加するJSONデータを返してください。
+    テキストは日本語で、説得力のある内容にしてください。
+
+    フォーマット:
+    [
+      { "id": "title", "text": "【緊急提言】${storeData.storeName} 改善レポート" },
+      { "id": "score-text", "text": "健康診断スコア: ${analysisResult.score}点 - ${analysisResult.summary}" },
+      { "id": "p1", "type": "text", "text": "課題1: ${analysisResult.points[0]?.title || ''}\\n${analysisResult.points[0]?.detail || ''}", "x": 40, "y": 240, "width": 515, "height": 100, "style": {"fontSize": 14, "color": "#000", "backgroundColor": "#fff0f0", "padding": "10px"} },
+      { "id": "p2", "type": "text", "text": "課題2: ${analysisResult.points[1]?.title || ''}\\n${analysisResult.points[1]?.detail || ''}", "x": 40, "y": 360, "width": 515, "height": 100, "style": {"fontSize": 14, "color": "#000", "backgroundColor": "#fff0f0", "padding": "10px"} }
+    ]
+    `;
+
+    try {
+        const res = await generateGeminiContent(prompt);
+        if (res.startsWith("【エラー】") || res.startsWith("Error")) {
+            alert(res);
+            setIsGeneratingMaterial(false);
+            return;
+        }
+
+        const jsonMatch = res.match(/\[[\s\S]*\]/);
+        if (jsonMatch) {
+            const updates = JSON.parse(jsonMatch[0]);
+            
+            setCanvasState(prev => {
+                let newElements = [...prev.elements];
+                updates.forEach((u: any) => {
+                    const idx = newElements.findIndex(e => e.id === u.id);
+                    if (idx >= 0) {
+                        newElements[idx] = { ...newElements[idx], ...u, style: { ...newElements[idx].style, ...(u.style || {}) } };
+                    } else {
+                        // Add new
+                        newElements.push({
+                            id: u.id || createId(),
+                            type: u.type || 'text',
+                            x: u.x || 40, y: u.y || 400,
+                            width: u.width || 200, height: u.height || 50,
+                            style: { 
+                                fontSize: 14, color: '#000', fontWeight: 'normal', 
+                                textAlign: 'left', lineHeight: 1.4, letterSpacing: 0,
+                                ...(u.style || {})
+                            },
+                            text: u.text || '',
+                            customCss: u.customCss || ''
+                        });
+                    }
+                });
+                return { ...prev, elements: newElements };
+            });
+        }
+    } catch(e) {
+        console.error(e);
+        alert("資料生成中にエラーが発生しました。");
+    } finally {
+        setIsGeneratingMaterial(false);
+    }
+ };
+
+ // --- Logic: Manual Generation ---
+ const generateManual = async () => {
+    if (!analysisResult) return;
+    setIsGeneratingManual(true);
+    
+    const prompt = `
+    あなたは店舗マネージャー向けのマニュアル作成のプロです。
+    以下の分析結果とアクションプランに基づいて、明日から使える具体的な業務マニュアル（ToDoリスト付き）を作成してください。
+    Markdown形式で出力してください。
+
+    【店舗状況】
+    ${JSON.stringify(storeData)}
+    【分析結果】
+    ${JSON.stringify(analysisResult)}
+    `;
+
+    try {
+        const text = await generateGeminiContent(prompt);
+        if (text.startsWith("【エラー】") || text.startsWith("Error")) {
+            alert(text);
+            setIsGeneratingManual(false);
+            return;
+        }
+        setManualText(text);
+    } catch(e) {
+        console.error(e);
+        alert("マニュアル生成中にエラーが発生しました。");
+    } finally {
+        setIsGeneratingManual(false);
+    }
+ };
+
+
+ // --- Sub-Components ---
+
+ const AnalysisTab = () => (
+    <div className="p-6 max-w-4xl mx-auto space-y-8 animate-in fade-in duration-500">
+        <div className="grid grid-cols-2 gap-8">
+            <div className="space-y-4">
+                <h2 className="text-xl font-bold flex items-center text-slate-800">
+                    <BarChart3 className="mr-2 h-5 w-5 text-indigo-600"/> 店舗データ入力
+                </h2>
+                <div className="grid gap-4 bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                    <div>
+                        <label className="text-xs font-semibold text-slate-500 uppercase">店舗名</label>
+                        <input className="w-full p-2 border rounded mt-1" value={storeData.storeName} onChange={e => setStoreData({...storeData, storeName: e.target.value})} />
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                        <div>
+                            <label className="text-xs font-semibold text-slate-500 uppercase">月商 (円)</label>
+                            <input className="w-full p-2 border rounded mt-1" value={storeData.monthlySales} onChange={e => setStoreData({...storeData, monthlySales: e.target.value})} />
+                        </div>
+                        <div>
+                            <label className="text-xs font-semibold text-slate-500 uppercase">客数 (人/月)</label>
+                            <input className="w-full p-2 border rounded mt-1" value={storeData.customerCount} onChange={e => setStoreData({...storeData, customerCount: e.target.value})} />
+                        </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                        <div>
+                            <label className="text-xs font-semibold text-slate-500 uppercase">客単価 (円)</label>
+                            <input className="w-full p-2 border rounded mt-1" value={storeData.avgCustomerSpend} onChange={e => setStoreData({...storeData, avgCustomerSpend: e.target.value})} />
+                        </div>
+                        <div>
+                            <label className="text-xs font-semibold text-slate-500 uppercase">スタッフ数</label>
+                            <input className="w-full p-2 border rounded mt-1" value={storeData.staffCount} onChange={e => setStoreData({...storeData, staffCount: e.target.value})} />
+                        </div>
+                    </div>
+                    <div>
+                        <label className="text-xs font-semibold text-slate-500 uppercase">現場の課題感・メモ</label>
+                        <textarea className="w-full p-2 border rounded mt-1 h-24" value={storeData.mainIssues} onChange={e => setStoreData({...storeData, mainIssues: e.target.value})} />
+                    </div>
+                    <button 
+                        onClick={runAnalysis}
+                        disabled={isAnalyzing}
+                        className="w-full bg-indigo-600 hover:bg-indigo-700 text-white p-3 rounded-lg font-bold flex justify-center items-center gap-2 transition-all"
+                    >
+                        {isAnalyzing ? <Loader2 className="animate-spin"/> : <Sparkles size={18}/>}
+                        AI診断を実行
+                    </button>
+                </div>
+            </div>
+
+            <div className="space-y-4">
+                <h2 className="text-xl font-bold flex items-center text-slate-800">
+                    <Monitor className="mr-2 h-5 w-5 text-indigo-600"/> 診断結果
+                </h2>
+                {analysisResult ? (
+                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 h-full flex flex-col gap-4">
+                        <div className="flex justify-between items-center border-b pb-4">
+                            <div>
+                                <div className="text-sm text-slate-500">店舗スコア</div>
+                                <div className="text-4xl font-black text-indigo-600">{analysisResult.score}<span className="text-lg text-slate-400 font-normal">/100</span></div>
+                            </div>
+                            <div className="text-right max-w-[200px]">
+                                <div className="text-xs font-bold text-slate-500 mb-1">AIサマリー</div>
+                                <p className="text-sm leading-tight text-slate-700">{analysisResult.summary}</p>
+                            </div>
+                        </div>
+
+                        <div className="flex-1 overflow-auto space-y-3">
+                            <h3 className="font-bold text-slate-700">改善ポイント</h3>
+                            {analysisResult.points.map((p, i) => (
+                                <div key={i} className={`p-3 rounded border-l-4 ${p.impact === 'High' ? 'border-red-500 bg-red-50' : 'border-yellow-500 bg-yellow-50'}`}>
+                                    <div className="flex justify-between">
+                                        <div className="font-bold text-sm">{p.title}</div>
+                                        <div className="text-xs font-bold px-2 py-0.5 rounded bg-white border">{p.impact}</div>
+                                    </div>
+                                    <p className="text-xs text-slate-600 mt-1">{p.detail}</p>
+                                </div>
+                            ))}
+                        </div>
+                        
+                        <div className="pt-4 border-t">
+                             <button onClick={() => { setActiveTab('material'); generateMaterial(); }} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white p-3 rounded-lg font-bold flex justify-center items-center gap-2">
+                                <Presentation size={18}/>
+                                この内容で資料を自動生成
+                            </button>
+                        </div>
+                    </div>
+                ) : (
+                    <div className="bg-slate-50 h-full rounded-xl border-2 border-dashed border-slate-200 flex flex-col items-center justify-center text-slate-400 p-8 text-center">
+                        <Bot size={48} className="mb-4 opacity-50"/>
+                        <p>左側のデータを入力して<br/>「AI診断を実行」を押してください</p>
+                    </div>
+                )}
+            </div>
+        </div>
+    </div>
+ );
+
+ const MaterialTab = () => (
+    <div className="h-full flex flex-col">
+        {/* Toolbar */}
+        <div className="h-14 border-b bg-white flex items-center px-4 justify-between shrink-0">
+            <div className="flex items-center gap-2">
+                <button className="p-2 hover:bg-slate-100 rounded" onClick={undo} disabled={!canUndo}><Undo size={18}/></button>
+                <button className="p-2 hover:bg-slate-100 rounded" onClick={redo} disabled={!canRedo}><Redo size={18}/></button>
+                <div className="w-px h-6 bg-slate-200 mx-2"/>
+                <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-slate-500">ZOOM:</span>
+                    <button className="px-2 py-1 bg-slate-100 text-xs rounded hover:bg-slate-200" onClick={() => setScale(s => Math.max(0.2, s - 0.1))}>-</button>
+                    <span className="text-xs w-10 text-center">{Math.round(scale * 100)}%</span>
+                    <button className="px-2 py-1 bg-slate-100 text-xs rounded hover:bg-slate-200" onClick={() => setScale(s => Math.min(2, s + 0.1))}>+</button>
+                </div>
+            </div>
+            
+            <div className="flex gap-2">
+                 <button 
+                    onClick={generateMaterial} 
+                    disabled={isGeneratingMaterial || !analysisResult}
+                    className="flex items-center gap-2 bg-indigo-50 text-indigo-600 px-4 py-2 rounded text-sm font-bold hover:bg-indigo-100 disabled:opacity-50"
+                 >
+                    {isGeneratingMaterial ? <Loader2 className="animate-spin" size={16}/> : <Sparkles size={16}/>}
+                    AI再生成
+                 </button>
+                 <button 
+                    onClick={() => { setActiveTab('manual'); if(!manualText) generateManual(); }}
+                    className="flex items-center gap-2 bg-slate-800 text-white px-4 py-2 rounded text-sm font-bold hover:bg-slate-700"
+                 >
+                    次へ: アクション作成 <ArrowRight size={16}/>
+                 </button>
+            </div>
+        </div>
+
+        <div className="flex-1 relative bg-slate-100 overflow-hidden flex items-center justify-center p-8">
+            <div 
+                className="bg-white shadow-xl relative transition-transform duration-200 origin-center"
+                style={{
+                    width: canvasState.canvasSize.width,
+                    height: canvasState.canvasSize.height,
+                    transform: `scale(${scale})`,
+                    backgroundColor: canvasState.background.color
+                }}
+                onClick={() => setSelectedId(null)}
+            >
+                {canvasState.elements.map(el => (
+                    <CanvasElementRender
+                        key={el.id}
+                        element={el}
+                        isSelected={selectedId === el.id}
+                        onSelect={() => setSelectedId(el.id)}
+                        onChange={(updates) => {
+                            setCanvasState(prev => ({
+                                ...prev,
+                                elements: prev.elements.map(e => e.id === el.id ? { ...e, ...updates } : e)
+                            }));
+                        }}
+                        scale={scale}
+                    />
+                ))}
+            </div>
+        </div>
+    </div>
+ );
+
+ const ManualTab = () => (
+    <div className="h-full flex flex-col p-6 max-w-5xl mx-auto w-full">
+         <div className="flex justify-between items-center mb-6">
+            <h2 className="text-2xl font-bold flex items-center text-slate-800">
+                <BookOpen className="mr-3 h-6 w-6 text-indigo-600"/> アクションマニュアル
+            </h2>
+            <button 
+                onClick={generateManual}
+                disabled={isGeneratingManual}
+                className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg font-bold hover:bg-indigo-700 disabled:opacity-50"
+            >
+                {isGeneratingManual ? <Loader2 className="animate-spin" size={18}/> : <RefreshCcw size={18}/>}
+                マニュアルを再生成
+            </button>
+         </div>
+
+         <div className="flex-1 bg-white rounded-xl shadow-sm border border-slate-200 flex overflow-hidden">
+             {/* Preview Area */}
+             <div className="flex-1 p-8 overflow-y-auto">
+                {manualText ? (
+                    <div className="prose prose-slate max-w-none">
+                        <pre className="whitespace-pre-wrap font-sans text-sm text-slate-700 leading-relaxed">
+                            {manualText}
+                        </pre>
+                    </div>
+                ) : (
+                    <div className="h-full flex flex-col items-center justify-center text-slate-400">
+                        <Loader2 className="animate-spin mb-4" size={32}/>
+                        <p>マニュアルを生成中...</p>
+                    </div>
+                )}
+             </div>
+             
+             {/* Sidebar for tasks */}
+             <div className="w-80 border-l bg-slate-50 p-6 overflow-y-auto">
+                 <h3 className="font-bold text-slate-700 mb-4 flex items-center gap-2">
+                    <Check size={16}/> 優先タスク
+                 </h3>
+                 {analysisResult ? (
+                     <div className="space-y-3">
+                         {analysisResult.points.map((p, i) => (
+                             <div key={i} className="bg-white p-3 rounded shadow-sm border flex gap-3 items-start">
+                                 <input type="checkbox" className="mt-1"/>
+                                 <div>
+                                     <div className="text-sm font-bold text-slate-800">{p.title}</div>
+                                     <div className="text-xs text-slate-500 mt-1">優先度: {p.impact}</div>
+                                 </div>
+                             </div>
+                         ))}
+                     </div>
+                 ) : (
+                     <p className="text-xs text-slate-500">分析結果がありません</p>
+                 )}
+             </div>
+         </div>
+    </div>
+ );
+
+ return (
+  <div className="flex flex-col h-screen bg-slate-50 text-slate-900 font-sans">
+   {/* Header Tab Bar */}
+   <div className="h-16 bg-white border-b flex items-center px-6 justify-between shrink-0 z-50 shadow-sm">
+    <div className="flex items-center gap-3">
+        <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white font-bold">Y</div>
+        <h1 className="font-bold text-lg tracking-tight">Store Health AI <span className="text-slate-400 font-normal ml-2 text-sm">Beta</span></h1>
+    </div>
+    
+    <div className="flex items-center bg-slate-100 p-1 rounded-lg">
+        {[
+            { id: 'analysis', label: '1. 分析・診断', icon: BarChart3 },
+            { id: 'material', label: '2. 資料作成', icon: Presentation },
+            { id: 'manual', label: '3. マニュアル', icon: BookOpen },
+        ].map((tab) => (
+            <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id as any)}
+                className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-bold transition-all ${
+                    activeTab === tab.id 
+                    ? 'bg-white text-indigo-600 shadow-sm' 
+                    : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'
+                }`}
+            >
+                <tab.icon size={16}/>
+                {tab.label}
+            </button>
+        ))}
+    </div>
+
+    {/* 修正箇所3: ヘッダーに設定ボタンを追加 */}
+    <div className="flex items-center gap-4">
+        <button 
+          onClick={() => setIsSettingsOpen(true)}
+          className="p-2 hover:bg-slate-100 rounded-full text-slate-500 transition-colors"
+          title="API設定"
+        >
+          <Settings size={20} />
+        </button>
+        <div className="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center">
+            <User size={16} className="text-slate-500"/>
+        </div>
+    </div>
+   </div>
+
+   {/* Main Content Area */}
+   <div className="flex-1 overflow-hidden relative">
+        {activeTab === 'analysis' && <AnalysisTab />}
+        {activeTab === 'material' && <MaterialTab />}
+        {activeTab === 'manual' && <ManualTab />}
+   </div>
+
+    {/* 修正箇所3: 設定モーダル */}
+    {isSettingsOpen && (
+    <div className="fixed inset-0 bg-black/50 z-[100] flex items-center justify-center p-4">
+        <div className="bg-white rounded-xl shadow-2xl max-w-md w-full p-6 animate-in zoom-in duration-200">
+        <div className="flex justify-between items-center mb-4">
+            <h3 className="text-lg font-bold flex items-center gap-2">
+            <Settings size={20} className="text-indigo-600"/> API設定
+            </h3>
+            <button onClick={() => setIsSettingsOpen(false)}><X size={20}/></button>
+        </div>
+        <p className="text-sm text-slate-500 mb-4">
+            Google AI Studioで発行した Gemini APIキーを入力してください。<br/>
+            キーはあなたのブラウザにのみ保存されます。
+        </p>
+        <input 
+            type="password" 
+            className="w-full p-3 border rounded-lg mb-6 font-mono text-sm"
+            placeholder="AIzaSy..."
+            value={tempApiKey}
+            onChange={(e) => setTempApiKey(e.target.value)}
+        />
+        <div className="flex gap-3">
+            <button 
+            onClick={() => setIsSettingsOpen(false)}
+            className="flex-1 px-4 py-2 border rounded-lg font-bold hover:bg-slate-50"
+            >
+            キャンセル
+            </button>
+            <button 
+            onClick={saveApiKey}
+            className="flex-1 px-4 py-2 bg-indigo-600 text-white rounded-lg font-bold hover:bg-indigo-700"
+            >
+            保存する
+            </button>
+        </div>
+        </div>
+    </div>
+    )}
+  </div>
+ );
+}
